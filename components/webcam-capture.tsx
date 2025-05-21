@@ -2,7 +2,8 @@
 
 import { useRef, useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
-import { Camera, RefreshCw, UserCheck } from "lucide-react"
+import { Camera, RefreshCw, UserCheck, AlertCircle } from "lucide-react"
+import * as faceapi from "face-api.js"
 
 interface WebcamCaptureProps {
   onCapture?: (imageSrc: string) => void
@@ -18,6 +19,45 @@ export default function WebcamCapture({ onCapture, onDetect, width = 640, height
   const [isRecognizing, setIsRecognizing] = useState(false)
   const [detectedUser, setDetectedUser] = useState<string | null>(null)
   const [permissionDenied, setPermissionDenied] = useState(false)
+  const [modelsLoaded, setModelsLoaded] = useState(false)
+  const [loadingModels, setLoadingModels] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // Load face-api models
+  const loadModels = async () => {
+    try {
+      setLoadingModels(true)
+      setError(null)
+
+      // Set the path to the models
+      const MODEL_URL = "/models"
+
+      // Load the required models
+      await Promise.all([
+        faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+        faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+        faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
+        faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL),
+        faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
+      ])
+
+      setModelsLoaded(true)
+      console.log("Face recognition models loaded successfully")
+    } catch (err) {
+      console.error("Error loading face recognition models:", err)
+      setError("Failed to load facial recognition models. Please refresh and try again.")
+    } finally {
+      setLoadingModels(false)
+    }
+  }
+
+  useEffect(() => {
+    loadModels()
+
+    return () => {
+      stopWebcam()
+    }
+  }, [])
 
   const startWebcam = async () => {
     try {
@@ -67,42 +107,129 @@ export default function WebcamCapture({ onCapture, onDetect, width = 640, height
     }
   }
 
-  const startRecognition = () => {
-    setIsRecognizing(true)
+  // Function to load student facial data
+  const loadLabeledDescriptors = async () => {
+    // In a real application, this would load from a database
+    // For this example, we'll use mock data
 
-    // Simulate facial recognition process
-    setTimeout(() => {
-      // Mock detection - in a real app, this would use actual facial recognition
-      const mockStudentIds = ["S12345", "S12346", "S12347", "S12348"]
-      const detectedId = mockStudentIds[Math.floor(Math.random() * mockStudentIds.length)]
+    // Mock student data with facial descriptors
+    // In a real system, these would be actual 128-dimensional face descriptors
+    const studentData = [
+      {
+        id: "S12345",
+        name: "John Doe",
+        descriptors: [new Float32Array(128).fill(0.1)], // Mock descriptor
+      },
+      {
+        id: "S12346",
+        name: "Jane Smith",
+        descriptors: [new Float32Array(128).fill(0.2)], // Mock descriptor
+      },
+      {
+        id: "S12347",
+        name: "Bob Johnson",
+        descriptors: [new Float32Array(128).fill(0.3)], // Mock descriptor
+      },
+      {
+        id: "S12348",
+        name: "Alice Brown",
+        descriptors: [new Float32Array(128).fill(0.4)], // Mock descriptor
+      },
+    ]
 
-      setDetectedUser(detectedId)
-      if (onDetect) {
-        onDetect(detectedId)
+    // Convert to LabeledFaceDescriptors format
+    return Promise.all(
+      studentData.map(async (student) => {
+        return new faceapi.LabeledFaceDescriptors(student.id, student.descriptors)
+      }),
+    )
+  }
+
+  const startRecognition = async () => {
+    if (!modelsLoaded) {
+      setError("Face recognition models not loaded. Please wait or refresh.")
+      return
+    }
+
+    if (!videoRef.current || !isStreaming) {
+      setError("Webcam not active. Please start the camera first.")
+      return
+    }
+
+    try {
+      setIsRecognizing(true)
+      setError(null)
+
+      // Get the face detector options
+      const detectionOptions = new faceapi.TinyFaceDetectorOptions({ inputSize: 320 })
+
+      // Detect all faces in the video stream with landmarks and descriptors
+      const detections = await faceapi
+        .detectAllFaces(videoRef.current, detectionOptions)
+        .withFaceLandmarks()
+        .withFaceDescriptors()
+
+      if (detections.length === 0) {
+        setError("No face detected. Please ensure your face is clearly visible.")
+        setIsRecognizing(false)
+        return
       }
 
+      if (detections.length > 1) {
+        setError("Multiple faces detected. Please ensure only one person is in frame.")
+        setIsRecognizing(false)
+        return
+      }
+
+      // Load the labeled face descriptors (student database)
+      const labeledDescriptors = await loadLabeledDescriptors()
+
+      // Create face matcher with labeled descriptors
+      const faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.6) // 0.6 is the distance threshold
+
+      // Get the best match for the detected face
+      const descriptor = detections[0].descriptor
+      const match = faceMatcher.findBestMatch(descriptor)
+
+      // If we have a match that's not "unknown"
+      if (match && match.label !== "unknown") {
+        setDetectedUser(match.label)
+        if (onDetect) {
+          onDetect(match.label)
+        }
+      } else {
+        setError("Face not recognized. Please try again or use manual entry.")
+      }
+    } catch (err) {
+      console.error("Error during facial recognition:", err)
+      setError("An error occurred during facial recognition. Please try again.")
+    } finally {
       setIsRecognizing(false)
-    }, 2000)
+    }
   }
 
   const resetDetection = () => {
     setDetectedUser(null)
+    setError(null)
   }
-
-  useEffect(() => {
-    return () => {
-      stopWebcam()
-    }
-  }, [])
 
   return (
     <div className="flex flex-col items-center">
       <div className="relative rounded-lg overflow-hidden bg-gray-100 mb-4">
         {!isStreaming && !permissionDenied && (
           <div className="absolute inset-0 flex items-center justify-center bg-gray-100">
-            <Button onClick={startWebcam} className="bg-primary">
-              <Camera className="mr-2 h-4 w-4" />
-              Start Camera
+            <Button onClick={startWebcam} className="bg-primary" disabled={loadingModels}>
+              {loadingModels ? (
+                <>
+                  <div className="animate-spin mr-2 h-4 w-4 border-2 border-current border-t-transparent rounded-full"></div>
+                  Loading Models...
+                </>
+              ) : (
+                <>
+                  <Camera className="mr-2 h-4 w-4" />
+                  Start Camera
+                </>
+              )}
             </Button>
           </div>
         )}
@@ -141,6 +268,18 @@ export default function WebcamCapture({ onCapture, onDetect, width = 640, height
             </Button>
           </div>
         )}
+
+        {error && (
+          <div className="absolute bottom-4 left-4 right-4 bg-red-100 border border-red-500 rounded-lg p-3 flex items-center justify-between">
+            <div className="flex items-center">
+              <AlertCircle className="h-5 w-5 text-red-600 mr-2" />
+              <span className="font-medium text-red-800">{error}</span>
+            </div>
+            <Button size="sm" variant="ghost" onClick={resetDetection}>
+              <RefreshCw className="h-4 w-4" />
+            </Button>
+          </div>
+        )}
       </div>
 
       {isStreaming && !detectedUser && (
@@ -150,7 +289,7 @@ export default function WebcamCapture({ onCapture, onDetect, width = 640, height
             Capture Image
           </Button>
 
-          <Button onClick={startRecognition} disabled={isRecognizing} className="bg-primary">
+          <Button onClick={startRecognition} disabled={isRecognizing || !modelsLoaded} className="bg-primary">
             {isRecognizing ? (
               <>
                 <div className="animate-spin mr-2 h-4 w-4 border-2 border-current border-t-transparent rounded-full"></div>
